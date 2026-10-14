@@ -97,3 +97,113 @@ def test_invalid_code_and_password_out_of_order(api):
     fake.sign_in.side_effect=errors.PhoneCodeExpiredError(request=None)
     assert client.post('/auth/code',json={'code':'12345'}).status_code==400
     assert 'phone_code_hash' not in client.get('/auth/status').text
+
+
+def import_contacts(client):
+    out=io.BytesIO()
+    pd.DataFrame({'Nome':['Ana','Bia','Sem username','Ana duplicada'],'@usuario':['@alice_test','@bia_test','','@ALICE_TEST'],'ID':['11','22','33','11']}).to_excel(out,index=False)
+    r=client.post('/leads/import',files={'file':('members.xlsx',out.getvalue())})
+    assert r.status_code==200,r.text
+    return r.json(),client.get('/leads').json()
+
+
+def send(client,uid,request_id=None,**kwargs):
+    import uuid
+    data={'text':'Olá pessoa','confirmed':'true','request_id':request_id or str(uuid.uuid4())}
+    data.update(kwargs.pop('data',{}))
+    return client.post(f'/leads/{uid}/send',data=data,**kwargs)
+
+
+def prepare_sender(fake):
+    fake.get_entity=AsyncMock(return_value=User(id=11,first_name='Ana',username='alice_test'))
+    fake.send_message=AsyncMock()
+    fake.send_file=AsyncMock()
+
+
+def test_contacts_import_repeat_and_single_send_idempotency(api):
+    import uuid
+    client,fake,module=api
+    prepare_sender(fake)
+    info,leads=import_contacts(client)
+    assert info['added']==2 and info['invalid']==1 and info['duplicates']==1
+    info,_=import_contacts(client)
+    assert info['added']==0 and info['already_imported']==2
+    rid=str(uuid.uuid4())
+    r=send(client,leads[0]['id'],rid)
+    assert r.status_code==200,r.text
+    assert fake.send_message.await_count==1
+    assert fake.send_message.await_args.kwargs['parse_mode'] is None
+    assert send(client,leads[0]['id'],rid).json()['duplicate_prevented'] is True
+    assert fake.send_message.await_count==1
+    rows=client.get('/leads').json()
+    assert rows[0]['status']=='sent' and rows[0]['last_contact']
+    assert rows[1]['status']=='pending'
+    assert send(client,leads[0]['id']).status_code==409
+    assert send(client,leads[1]['id']).status_code==429
+
+
+def test_send_confirmation_block_and_id_mismatch(api):
+    client,fake,module=api
+    prepare_sender(fake)
+    _,leads=import_contacts(client)
+    uid=leads[0]['id']
+    assert send(client,uid,data={'confirmed':'false'}).status_code==400
+    fake.get_entity.return_value=User(id=999,username='alice_test')
+    assert send(client,uid).status_code==409
+    assert fake.send_message.await_count==0
+    assert client.post(f'/leads/{uid}/block',json={'blocked':True}).status_code==200
+    assert send(client,uid).status_code==403
+
+
+def test_image_validation_and_caption(api):
+    from PIL import Image
+    client,fake,module=api
+    prepare_sender(fake)
+    _,leads=import_contacts(client)
+    uid=leads[0]['id']
+    assert send(client,uid,files={'image':('fake.png',b'not an image','image/png')}).status_code==400
+    img=io.BytesIO()
+    Image.new('RGB',(4,4),'blue').save(img,format='PNG')
+    assert send(client,uid,data={'text':'a'*1025},files={'image':('photo.png',img.getvalue(),'image/png')}).status_code==400
+    r=send(client,uid,files={'image':('photo.png',img.getvalue(),'image/png')})
+    assert r.status_code==200,r.text
+    fake.send_file.assert_awaited_once()
+    assert fake.send_file.await_args.kwargs['caption']=='Olá pessoa'
+    assert fake.send_message.await_count==0
+
+
+def test_send_flood_wait_persisted_and_unknown_result(api):
+    client,fake,module=api
+    prepare_sender(fake)
+    _,leads=import_contacts(client)
+    uid=leads[0]['id']
+    fake.send_message.side_effect=errors.FloodWaitError(request=None,capture=20)
+    r=send(client,uid)
+    assert r.status_code==429 and r.headers['retry-after']=='20'
+    r=send(client,uid)
+    assert r.status_code==429
+    assert fake.send_message.await_count==1
+    with module.Session() as db:
+        control=db.get(module.SendControl,1)
+        control.next_allowed=datetime(2000,1,1,tzinfo=timezone.utc)
+        db.commit()
+    fake.send_message.side_effect=ConnectionError('fictional connection loss')
+    assert send(client,uid).status_code==502
+    assert client.get('/leads').json()[0]['status']=='unknown'
+    assert send(client,uid).status_code==409
+    assert fake.send_message.await_count==2
+
+
+def test_send_rejects_bot_and_privacy_restriction(api):
+    client,fake,module=api
+    prepare_sender(fake)
+    _,leads=import_contacts(client)
+    uid=leads[0]['id']
+    fake.get_entity.return_value=User(id=11,bot=True)
+    assert send(client,uid).status_code==400
+    fake.get_entity.return_value=User(id=11)
+    fake.send_message.side_effect=errors.UserPrivacyRestrictedError(request=None)
+    assert send(client,uid).status_code==403
+    assert client.get('/leads').json()[0]['blocked'] is True
+    assert send(client,uid).status_code==403
+    assert fake.send_message.await_count==1

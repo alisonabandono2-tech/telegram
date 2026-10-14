@@ -13,6 +13,7 @@ from pydantic import BaseModel, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import create_engine, Column, Integer, JSON, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
 from telethon import TelegramClient, errors
 from telethon.tl.types import User
 from .audit import parse_ids, compare
@@ -31,7 +32,7 @@ class Settings(BaseSettings):
 settings = Settings()
 if len(settings.app_token.get_secret_value()) < 24:
     raise RuntimeError('APP_TOKEN deve ter pelo menos 24 caracteres')
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+engine = create_engine(settings.database_url, pool_pre_ping=True, hide_parameters=True)
 Session = sessionmaker(bind=engine)
 Base = declarative_base()
 
@@ -47,7 +48,7 @@ session_path = Path(settings.session_dir).resolve()
 session_path.mkdir(parents=True, exist_ok=True)
 if os.name != 'nt':
     session_path.chmod(0o700)
-client = TelegramClient(str(session_path / 'account'), settings.telegram_api_id, settings.telegram_api_hash.get_secret_value(), flood_sleep_threshold=0)
+client = TelegramClient(str(session_path / 'account'), settings.telegram_api_id, settings.telegram_api_hash.get_secret_value(), flood_sleep_threshold=0, request_retries=0, connection_retries=1, raise_last_call_error=True)
 lock = asyncio.Lock()
 login = {}
 progress = {'state': 'idle', 'processed': 0}
@@ -65,7 +66,7 @@ async def lifespan(app):
     engine.dispose()
 
 
-app = FastAPI(title='Telegram CRM — Auditoria', lifespan=lifespan)
+app = FastAPI(title='Telegram CRM — Contatos e auditoria', lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_methods=['GET', 'POST'], allow_headers=['Authorization', 'Content-Type'])
 
 
@@ -108,6 +109,12 @@ async def telegram_error(request, exc):
 async def connection_error(request, exc):
     from fastapi.responses import JSONResponse
     return JSONResponse(status_code=503, content={'detail': 'Conexão indisponível. Verifique a rede e reinicie o backend se necessário.'})
+
+
+@app.exception_handler(SQLAlchemyError)
+async def database_error(request, exc):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=503, content={'detail': 'Banco indisponível. Se tentou enviar, confira a conversa no Telegram antes de repetir.'})
 
 
 @app.get('/health')
@@ -231,3 +238,198 @@ def export(audit_id: int, format: str = 'xlsx'):
         media = 'text/csv'
     output.seek(0)
     return StreamingResponse(output, media_type=media, headers={'Content-Disposition': f'attachment; filename="auditoria-{audit_id}.{format}"'})
+
+# O módulo de contatos é separado da auditoria; só envia mediante ação individual.
+from sqlalchemy import String, Boolean
+from .leads import parse_leads
+import uuid
+
+
+class Lead(Base):
+    __tablename__ = 'leads'
+    id = Column(Integer, primary_key=True)
+    username = Column(String(32), unique=True, nullable=False)
+    name = Column(String(200), default='')
+    telegram_id = Column(String(32), nullable=True)
+    status = Column(String(20), default='pending')
+    last_contact = Column(DateTime(timezone=True), nullable=True)
+    blocked = Column(Boolean, default=False)
+
+
+class SendAttempt(Base):
+    __tablename__ = 'send_attempts'
+    id = Column(String(36), primary_key=True)
+    lead_id = Column(Integer, nullable=False)
+    state = Column(String(20), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class SendControl(Base):
+    __tablename__ = 'send_control'
+    id = Column(Integer, primary_key=True)
+    next_allowed = Column(DateTime(timezone=True), nullable=True)
+
+
+def lead_dict(item):
+    return {'id': item.id, 'name': item.name, 'username': item.username, 'telegram_id': item.telegram_id, 'status': item.status, 'last_contact': item.last_contact.isoformat() if item.last_contact else None, 'blocked': item.blocked}
+
+
+@app.get('/leads', dependencies=[Depends(authorize)])
+def list_leads():
+    with Session() as db:
+        return [lead_dict(x) for x in db.query(Lead).order_by(Lead.id).all()]
+
+
+@app.post('/leads/import', dependencies=[Depends(authorize)])
+async def import_leads(file: UploadFile = File(...)):
+    data = await file.read(10 * 1024 * 1024 + 1)
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(413, 'Arquivo acima de 10 MB')
+    try:
+        rows, info = await asyncio.to_thread(parse_leads, data, file.filename or '')
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception:
+        raise HTTPException(400, 'Arquivo inválido. Use XLSX/CSV com Nome e @usuario.')
+    if not rows:
+        raise HTTPException(400, 'Nenhum username válido encontrado')
+    async with lock:
+        with Session() as db:
+            existing = {x.username for x in db.query(Lead).all()}
+            added = 0
+            for row in rows:
+                if row['username'] not in existing:
+                    db.add(Lead(**row))
+                    existing.add(row['username'])
+                    added += 1
+            db.commit()
+    return {**info, 'added': added, 'already_imported': len(rows)-added}
+
+
+class BlockLead(BaseModel):
+    blocked: bool
+
+
+@app.post('/leads/{lead_id}/block', dependencies=[Depends(authorize)])
+def block_lead(lead_id: int, body: BlockLead):
+    with Session() as db:
+        item = db.get(Lead, lead_id)
+        if item is None:
+            raise HTTPException(404, 'Contato não encontrado')
+        item.blocked = body.blocked
+        db.commit()
+        return lead_dict(item)
+
+
+def set_cooldown(db, seconds):
+    from datetime import timedelta
+    control = db.get(SendControl, 1)
+    if control is None:
+        control = SendControl(id=1)
+        db.add(control)
+    control.next_allowed = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+
+@app.post('/leads/{lead_id}/send', dependencies=[Depends(authorize)])
+async def send_one(lead_id: int, text: str = Form(default=''), confirmed: bool = Form(default=False), request_id: str = Form(...), image: UploadFile | None = File(default=None)):
+    try:
+        request_id = str(uuid.UUID(request_id))
+    except ValueError:
+        raise HTTPException(400, 'Identificador do envio inválido')
+    if not confirmed:
+        raise HTTPException(400, 'Confirme destinatário e conteúdo antes de enviar')
+    if not text.strip() and image is None:
+        raise HTTPException(400, 'Escreva uma mensagem ou selecione uma imagem')
+    if len(text) > (1024 if image else 4096):
+        raise HTTPException(400, 'Texto acima do limite: 1024 com imagem ou 4096 sem imagem')
+    photo = None
+    if image is not None:
+        from PIL import Image, UnidentifiedImageError
+        data = await image.read(5 * 1024 * 1024 + 1)
+        if len(data) > 5 * 1024 * 1024:
+            raise HTTPException(413, 'Imagem acima de 5 MB')
+        try:
+            with Image.open(io.BytesIO(data)) as decoded:
+                if decoded.format not in {'JPEG', 'PNG'} or decoded.width * decoded.height > 20_000_000:
+                    raise ValueError()
+                decoded.verify()
+            photo = io.BytesIO(data)
+            photo.name = 'imagem.png' if data.startswith(b'\x89PNG') else 'imagem.jpg'
+        except (UnidentifiedImageError, ValueError, OSError, Image.DecompressionBombError):
+            raise HTTPException(400, 'Imagem inválida. Use PNG ou JPEG de até 20 megapixels.')
+    if lock.locked():
+        raise HTTPException(409, 'Outra operação está em andamento')
+    async with lock:
+        with Session() as db:
+            previous = db.get(SendAttempt, request_id)
+            if previous:
+                if previous.lead_id != lead_id:
+                    raise HTTPException(409, 'Identificador já usado para outro contato')
+                if previous.state == 'sent':
+                    return {'state': 'sent', 'duplicate_prevented': True}
+                raise HTTPException(409, 'Envio já registrado. Confira a conversa antes de tentar novamente.')
+            item = db.get(Lead, lead_id)
+            if item is None:
+                raise HTTPException(404, 'Contato não encontrado')
+            if item.blocked:
+                raise HTTPException(403, 'Contato bloqueado para novos envios')
+            if item.status in {'sent', 'unknown', 'sending'}:
+                raise HTTPException(409, 'Contato já enviado ou com resultado incerto. Confira a conversa no Telegram.')
+            control = db.get(SendControl, 1)
+            if control and control.next_allowed:
+                wait = (control.next_allowed.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+                if wait > 0:
+                    raise HTTPException(429, 'Aguarde antes do próximo envio.', headers={'Retry-After': str(int(wait)+1)})
+            me = await client.get_me()
+            if me is None:
+                raise HTTPException(401, 'Conecte sua conta Telegram')
+            try:
+                target = await client.get_entity(item.username)
+            except (ValueError, errors.UsernameInvalidError, errors.UsernameNotOccupiedError):
+                raise HTTPException(400, 'Username não encontrado. Nenhum envio realizado.')
+            except errors.FloodWaitError as exc:
+                set_cooldown(db, exc.seconds)
+                db.commit()
+                raise
+            if not isinstance(target, User) or target.bot or target.id == me.id:
+                raise HTTPException(400, 'O destinatário deve ser uma pessoa, não bot, grupo ou a própria conta')
+            if item.telegram_id and str(target.id) != item.telegram_id:
+                raise HTTPException(409, 'O username aponta para um ID diferente da planilha. Nenhum envio realizado.')
+            attempt = SendAttempt(id=request_id, lead_id=lead_id, state='sending')
+            db.add(attempt)
+            item.status = 'unknown'  # conservado após queda do processo/rede; não repetimos automaticamente
+            db.commit()
+            try:
+                if photo is not None:
+                    await client.send_file(target, photo, caption=text, parse_mode=None)
+                else:
+                    await client.send_message(target, text, parse_mode=None)
+            except errors.FloodWaitError as exc:
+                attempt.state = 'failed'
+                item.status = 'pending'
+                set_cooldown(db, exc.seconds)
+                db.commit()
+                raise
+            except errors.PeerFloodError:
+                attempt.state = 'failed'
+                item.status = 'pending'
+                set_cooldown(db, 24 * 60 * 60)
+                db.commit()
+                raise HTTPException(429, 'Telegram restringiu os envios. Pare e verifique a conta; o sistema não tentará novamente.', headers={'Retry-After': '86400'})
+            except (errors.UserPrivacyRestrictedError, errors.UserIsBlockedError, errors.YouBlockedUserError, errors.ChatWriteForbiddenError):
+                attempt.state = 'failed'
+                item.status = 'pending'
+                item.blocked = True
+                db.commit()
+                raise HTTPException(403, 'Telegram não permite enviar a esse contato. Contato bloqueado no sistema.')
+            except Exception:
+                attempt.state = 'unknown'
+                db.commit()
+                raise HTTPException(502, 'Resultado incerto. Confira a conversa no Telegram; não repita o envio automaticamente.')
+            attempt.state = 'sent'
+            item.status = 'sent'
+            item.telegram_id = str(target.id)
+            item.last_contact = datetime.now(timezone.utc)
+            set_cooldown(db, 10)
+            db.commit()
+            return {'state': 'sent', 'lead': lead_dict(item)}

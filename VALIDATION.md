@@ -1,14 +1,12 @@
-# Validação da primeira versão
+# Validação — contatos individuais e auditoria
 
-- Planilha fornecida: 8.589 linhas, coluna `ID`, 8.589 IDs únicos válidos; zero duplicatas e zero linhas inválidas. Dados pessoais não foram adicionados ao repositório.
-- 10 testes automatizados passaram com SQLite e novamente com PostgreSQL 16 real. Cobrem importação, ambiguidade, precisão de IDs grandes, comparação sem username, login/código/2FA com Telethon simulado, código expirado, sessões não autenticadas, FloodWait, proteção por token, persistência e exportações CSV/XLSX com neutralização de fórmulas.
-- PostgreSQL foi iniciado via Docker Compose e respondeu ao check de prontidão.
-- Next.js 16.4.0: build de produção e checagem TypeScript passaram. Dashboard iniciado e validado via requisição HTTP: status 200, título, indicadores e formulário presentes.
-- `npm audit --omit=dev`: nenhuma vulnerabilidade reportada após atualizar as dependências.
-- Instalação Python com versões fixadas e instalação frontend via lockfile foram executadas. `uvloop` possui marcador para não ser instalado no Windows.
+- Planilha fornecida: 8.589 IDs únicos válidos, coluna ID, sem duplicatas ou IDs inválidos. Para a tela de contatos, 1.427 usernames com formato válido e 7.162 linhas sem username válido; existência desses perfis ainda não validada no Telegram. Dados pessoais não foram adicionados ao repositório.
+- 15 testes passaram em SQLite e PostgreSQL 16 real. Auditoria cobre importação, IDs grandes, ambiguidade, comparação, login/2FA, autenticação, FloodWait, persistência e exportação. Contatos cobre importação repetível, exclusão de linhas sem username, envio único e prevenção de duplicatas, cooldown, confirmação, bloqueio, ID divergente, imagem/caption, privacidade e resultado incerto após perda de conexão.
+- Teste de navegador Chromium com Next e FastAPI reais, usando Telethon simulado: login/código/2FA, importação CSV, busca, seleção, personalização `{nome}`, prévia PNG, confirmação, um envio simulado, próximo contato, bloqueio, proteção de origem e viewport mobile passaram. O teste verificou que o outro contato permaneceu pendente e que não houve erros JavaScript.
+- Next.js 16.4.0: build de produção e TypeScript passaram. Proxy mantém APP_TOKEN no servidor e não exige token de bot no dashboard. A auditoria continua em `/auditoria`.
+- Os processos de teste não se conectaram ao Telegram real. O servidor fictício está em backend/tests/browser_server.py e não participa do startup normal.
+- A execução desta versão foi feita em Linux. O usuário já conseguiu instalar as dependências Python/frontend e iniciar PostgreSQL no Windows; o login e envio da nova versão no Windows ainda estão pendentes.
 
-Não foi feita autenticação real nem leitura de diálogos da conta. API ID/API Hash não estão configurados. O resultado de correspondência dos membros só poderá ser calculado após conectar a conta. A senha 2FA e o código devem ser informados apenas no dashboard local; não envie credenciais no chat.
+Não houve autenticação real, resolução real de usernames, leitura real de diálogos ou envio de mensagens. Essas operações dependem de API ID/API Hash e da conta do usuário. A disponibilidade de usernames, permissões e limites de envio é determinada pelo Telegram. Enviar lentamente não elimina risco de limitações ou suspensão.
 
-A execução ocorreu em Linux. As instruções PowerShell para Windows estão no README; não houve teste em uma máquina Windows nem automação visual de navegador. Há um aviso de depreciação da integração Starlette/AnyIO nos testes, sem falhas.
-
-`install_script` e `start_skill` foram salvos no rascunho do ambiente; a publicação depende de revisão, salvamento e publicação pelo usuário nas configurações do ambiente. Isso não equivale a validação em uma tarefa nova.
+Há um aviso de depreciação da integração Starlette/AnyIO nos testes, sem falhas. O download de um Chromium adicional foi bloqueado pela política de rede; o teste de navegador foi concluído usando /usr/bin/chromium já instalado, sem alterar a política nem desabilitar TLS.
