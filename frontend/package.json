@@ -1,0 +1,1 @@
+{"name":"telegram-crm-dashboard","private":true,"scripts":{"dev":"next dev --hostname 127.0.0.1","build":"next build","start":"next start --hostname 127.0.0.1","typecheck":"tsc --noEmit"},"dependencies":{"next":"16.4.0","react":"19.1.4","react-dom":"19.1.4"},"devDependencies":{"@types/node":"22.15.3","@types/react":"19.1.2","@types/react-dom":"19.1.2","typescript":"5.8.3"}}
