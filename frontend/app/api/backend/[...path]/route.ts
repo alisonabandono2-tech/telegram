@@ -1,7 +1,7 @@
 import {NextRequest} from 'next/server';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-const allowed = /^(auth\/(status|phone|code|password)|leads(?:\/import|\/[0-9]+\/(send|block))?)$/;
+const allowed = /^(auth\/(status|phone|code|password)|leads(?:\/import|\/[0-9]+\/(send|block|delete))?)$/;
 async function proxy(request:NextRequest, context:{params:Promise<{path:string[]}>}){
  const host=request.headers.get('host')||'';
  if(!/^(localhost|127\.0\.0\.1):3000$/.test(host))return Response.json({detail:'Acesso permitido somente pelo aplicativo local.'},{status:403});

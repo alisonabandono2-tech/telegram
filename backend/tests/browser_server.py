@@ -40,4 +40,7 @@ if __name__=='__main__':
     telethon.TelegramClient=FakeTelegram
     import uvicorn
     from app.main import app
+    @app.get('/__test__/fixture')
+    def fixture_marker():
+        return {'fixture': os.environ.get('TEST_RUN_MARKER','fictional-browser-test')}
     uvicorn.run(app,host='127.0.0.1',port=8000,access_log=False)

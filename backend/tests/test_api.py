@@ -207,3 +207,54 @@ def test_send_rejects_bot_and_privacy_restriction(api):
     assert client.get('/leads').json()[0]['blocked'] is True
     assert send(client,uid).status_code==403
     assert fake.send_message.await_count==1
+
+
+def test_delete_confirmation_persistence_import_and_no_send(api):
+    client,fake,module=api
+    prepare_sender(fake)
+    _,leads=import_contacts(client)
+    uid=leads[0]['id']
+    assert client.post(f'/leads/{uid}/delete',json={'confirmed':False}).status_code==400
+    assert len(client.get('/leads').json())==2
+    r=client.post(f'/leads/{uid}/delete',json={'confirmed':True})
+    assert r.status_code==200 and r.json()['removed']==1
+    assert [x['username'] for x in client.get('/leads').json()]==['bia_test']
+    info,rows=import_contacts(client)
+    assert info['added']==0 and info['excluded']==1 and info['already_imported']==1
+    assert len(rows)==1
+    assert send(client,uid).status_code==404
+    assert client.post(f'/leads/{uid}/block',json={'blocked':False}).status_code==404
+    assert fake.get_entity.await_count==0 and fake.send_message.await_count==0
+    assert client.post(f'/leads/{uid}/delete',json={'confirmed':True}).json()['removed']==0
+    with module.Session() as db:
+        assert db.get(module.Lead,uid).status=='deleted'
+
+
+def test_delete_excludes_known_id_with_changed_username_and_keeps_history(api):
+    client,fake,module=api
+    prepare_sender(fake)
+    _,leads=import_contacts(client)
+    uid=leads[0]['id']
+    assert send(client,uid).status_code==200
+    assert client.post(f'/leads/{uid}/delete',json={'confirmed':True}).status_code==200
+    out=io.BytesIO()
+    pd.DataFrame({'Nome':['Ana'],'username':['alice_changed'],'ID':['11']}).to_excel(out,index=False)
+    r=client.post('/leads/import',files={'file':('leads.xlsx',out.getvalue())})
+    assert r.status_code==200 and r.json()['excluded']==1 and r.json()['added']==0
+    with module.Session() as db:
+        assert db.query(module.SendAttempt).filter_by(lead_id=uid,state='sent').count()==1
+
+
+def test_delete_access_and_busy_guard(api):
+    client,fake,module=api
+    _,leads=import_contacts(client)
+    uid=leads[0]['id']
+    client.portal.call(module.lock.acquire)
+    try:
+        assert client.post(f'/leads/{uid}/delete',json={'confirmed':True}).status_code==409
+    finally:
+        client.portal.call(module.lock.release)
+    assert len(client.get('/leads').json())==2
+    assert client.post('/leads/99999/delete',json={'confirmed':True}).status_code==404
+    client.headers['Authorization']='Bearer wrong'
+    assert client.post(f'/leads/{uid}/delete',json={'confirmed':True}).status_code==401

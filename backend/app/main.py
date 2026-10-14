@@ -277,7 +277,7 @@ def lead_dict(item):
 @app.get('/leads', dependencies=[Depends(authorize)])
 def list_leads():
     with Session() as db:
-        return [lead_dict(x) for x in db.query(Lead).order_by(Lead.id).all()]
+        return [lead_dict(x) for x in db.query(Lead).filter(Lead.status != 'deleted').order_by(Lead.id).all()]
 
 
 @app.post('/leads/import', dependencies=[Depends(authorize)])
@@ -295,15 +295,21 @@ async def import_leads(file: UploadFile = File(...)):
         raise HTTPException(400, 'Nenhum username válido encontrado')
     async with lock:
         with Session() as db:
-            existing = {x.username for x in db.query(Lead).all()}
-            added = 0
+            existing_rows = db.query(Lead).all()
+            existing = {x.username for x in existing_rows}
+            excluded_names = {x.username for x in existing_rows if x.status == 'deleted'}
+            excluded_ids = {x.telegram_id for x in existing_rows if x.status == 'deleted' and x.telegram_id}
+            added, excluded = 0, 0
             for row in rows:
+                if row['username'] in excluded_names or (row['telegram_id'] and row['telegram_id'] in excluded_ids):
+                    excluded += 1
+                    continue
                 if row['username'] not in existing:
                     db.add(Lead(**row))
                     existing.add(row['username'])
                     added += 1
             db.commit()
-    return {**info, 'added': added, 'already_imported': len(rows)-added}
+    return {**info, 'added': added, 'already_imported': len(rows)-added-excluded, 'excluded': excluded}
 
 
 class BlockLead(BaseModel):
@@ -314,11 +320,41 @@ class BlockLead(BaseModel):
 def block_lead(lead_id: int, body: BlockLead):
     with Session() as db:
         item = db.get(Lead, lead_id)
-        if item is None:
+        if item is None or item.status == 'deleted':
             raise HTTPException(404, 'Contato não encontrado')
         item.blocked = body.blocked
         db.commit()
         return lead_dict(item)
+
+
+
+class DeleteLead(BaseModel):
+    confirmed: bool = False
+
+
+@app.post('/leads/{lead_id}/delete', dependencies=[Depends(authorize)])
+async def delete_lead(lead_id: int, body: DeleteLead):
+    if not body.confirmed:
+        raise HTTPException(400, 'Confirme a exclusão do contato')
+    if lock.locked():
+        raise HTTPException(409, 'Outra operação está em andamento. Aguarde antes de excluir.')
+    async with lock:
+        with Session() as db:
+            item = db.get(Lead, lead_id)
+            if item is None:
+                raise HTTPException(404, 'Contato não encontrado')
+            if item.status == 'deleted':
+                return {'state': 'deleted', 'lead_id': lead_id, 'removed': 0}
+            # Mantemos a exclusão e tentativas históricas para impedir reimportação/reenvio.
+            related = db.query(Lead).filter(Lead.telegram_id == item.telegram_id).all() if item.telegram_id else [item]
+            removed = 0
+            for contact in related:
+                if contact.status != 'deleted':
+                    contact.status = 'deleted'
+                    contact.blocked = True
+                    removed += 1
+            db.commit()
+            return {'state': 'deleted', 'lead_id': lead_id, 'removed': removed}
 
 
 def set_cooldown(db, seconds):
@@ -361,6 +397,9 @@ async def send_one(lead_id: int, text: str = Form(default=''), confirmed: bool =
         raise HTTPException(409, 'Outra operação está em andamento')
     async with lock:
         with Session() as db:
+            item = db.get(Lead, lead_id)
+            if item is None or item.status == 'deleted':
+                raise HTTPException(404, 'Contato não encontrado ou excluído')
             previous = db.get(SendAttempt, request_id)
             if previous:
                 if previous.lead_id != lead_id:
@@ -368,9 +407,6 @@ async def send_one(lead_id: int, text: str = Form(default=''), confirmed: bool =
                 if previous.state == 'sent':
                     return {'state': 'sent', 'duplicate_prevented': True}
                 raise HTTPException(409, 'Envio já registrado. Confira a conversa antes de tentar novamente.')
-            item = db.get(Lead, lead_id)
-            if item is None:
-                raise HTTPException(404, 'Contato não encontrado')
             if item.blocked:
                 raise HTTPException(403, 'Contato bloqueado para novos envios')
             if item.status in {'sent', 'unknown', 'sending'}:
@@ -393,6 +429,8 @@ async def send_one(lead_id: int, text: str = Form(default=''), confirmed: bool =
                 raise
             if not isinstance(target, User) or target.bot or target.id == me.id:
                 raise HTTPException(400, 'O destinatário deve ser uma pessoa, não bot, grupo ou a própria conta')
+            if db.query(Lead).filter(Lead.status == 'deleted', Lead.telegram_id == str(target.id)).first():
+                raise HTTPException(403, 'Esse usuário foi excluído da lista. Nenhum envio realizado.')
             if item.telegram_id and str(target.id) != item.telegram_id:
                 raise HTTPException(409, 'O username aponta para um ID diferente da planilha. Nenhum envio realizado.')
             attempt = SendAttempt(id=request_id, lead_id=lead_id, state='sending')

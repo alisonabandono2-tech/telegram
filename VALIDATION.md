@@ -10,3 +10,12 @@
 Não houve autenticação real, resolução real de usernames, leitura real de diálogos ou envio de mensagens. Essas operações dependem de API ID/API Hash e da conta do usuário. A disponibilidade de usernames, permissões e limites de envio é determinada pelo Telegram. Enviar lentamente não elimina risco de limitações ou suspensão.
 
 Há um aviso de depreciação da integração Starlette/AnyIO nos testes, sem falhas. O download de um Chromium adicional foi bloqueado pela política de rede; o teste de navegador foi concluído usando /usr/bin/chromium já instalado, sem alterar a política nem desabilitar TLS.
+
+
+## Exclusão de contatos
+
+- 20 testes Python passaram em SQLite e PostgreSQL real: 15 anteriores, 2 do filtro de planilha e 3 de exclusão. Cobrem confirmação, persistência, bloqueio de envio/reimportação, username alterado com ID conhecido, preservação de histórico, autenticação e operação em andamento.
+- Build de produção passou após adicionar o botão e a rota de exclusão.
+- O updater Windows baixa quatro arquivos da revisão exata, compara checksums e faz backup. Não foi executado em Windows neste ambiente Linux. Ele não altera sessões, configurações, dependências ou banco.
+- A preparação de hospedagem que o usuário cancelou foi preservada em arquivo local fora do checkout; esta atualização publica apenas o sistema local e a exclusão.
+- Teste Chromium passou: cancelar/confirmar exclusão, atualização dos contadores, manutenção de exclusões após nova importação, seleção do próximo e remoção do último contato sem erro. Nenhum contato real foi excluído durante testes.

@@ -8,6 +8,7 @@ Aplicação local para Windows com Next.js/TypeScript, FastAPI, Telethon (API MT
 - Importação XLSX ou CSV com `Nome` e `@usuario`/`username`; nome é opcional. Se houver `ID`, o sistema confirma que o username ainda pertence a esse ID antes de enviar.
 - Apenas contatos com username válido entram na lista. A planilha fornecida contém 1.427 usernames com formato válido entre 8.589 registros; a existência dos perfis depende da verificação real no Telegram.
 - Busca, filtros de pendentes/enviados/bloqueados, seleção de destinatário e contador de enviados.
+- **Excluir contato**: confirmação antes de remover da lista. Não altera o Telegram. A exclusão fica no banco e impede reimportação por username ou ID conhecido, preservando os registros de envios. Contatos com o mesmo ID conhecido são excluídos juntos. Não há restauração na interface nesta versão.
 - Mensagem editável com `{nome}` e prévia; PNG/JPEG até 5 MB e 20 megapixels. Máximo de 4.096 caracteres em texto ou 1.024 com imagem.
 - Um envio por clique após confirmação de destinatário, conteúdo e autorização para essa comunicação. Importação não presume consentimento. Próximo contato não envia nada.
 - Histórico de status persistido, bloqueio de contatos, prevenção de cliques duplicados e impedimento de novo envio a contatos já marcados como enviados.
@@ -80,3 +81,7 @@ Os testes usam Telethon simulado e SQLite por padrão. Para PostgreSQL, defina T
 Há também teste de navegador em `frontend/tests/browser-smoke.cjs` e backend fictício em `backend/tests/browser_server.py`. O servidor fictício é exclusivo de testes: não se conecta ao Telegram. Para reproduzir o teste, instale Playwright separadamente (por exemplo, em uma pasta temporária), execute browser_server.py, inicie Next com APP_TOKEN `fictional-token-for-tests-only-1234`, defina NODE_PATH para a instalação de Playwright, CHROMIUM_PATH para um Chromium instalado e TEST_IMAGE_BASE64 com um PNG fictício, e execute `node frontend/tests/browser-smoke.cjs`. Pare esses processos após o teste; nunca use o servidor fictício para contatos reais.
 
 Consulte VALIDATION.md para evidências e limitações. Autenticação, resolução de usernames e envio reais exigem as credenciais e a conta do usuário; nenhuma mensagem real foi enviada durante o desenvolvimento.
+
+## Atualizar apenas o botão de exclusão
+
+O helper `atualizar-exclusao.ps1 -Ref <SHA completo da versão>` atualiza apenas quatro arquivos de código. Execute na raiz da instalação, depois de parar backend e dashboard com Ctrl+C; mantenha Docker funcionando. O helper exige as portas 3000/8000 livres, baixa arquivos da revisão exata, verifica SHA256 de todos antes de substituir qualquer um, cria backup em `private/updates` e preserva .env, sessão, dependências e banco. Ele não foi executado em Windows durante desenvolvimento; se falhar, os backups de código ficam disponíveis. Não são necessárias migrações ou novas dependências para essa atualização. Reinicie os dois serviços e atualize a página depois.

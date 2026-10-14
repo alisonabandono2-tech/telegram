@@ -4,8 +4,8 @@ type Lead={id:number;name:string;username:string;telegram_id:string|null;status:
 export default function Contacts(){
  const [leads,setLeads]=useState<Lead[]>([]),[selected,setSelected]=useState<number|null>(null),[search,setSearch]=useState(''),[filter,setFilter]=useState('all'),[text,setText]=useState('Olá {nome}, tudo bem?'),[image,setImage]=useState<File|null>(null),[preview,setPreview]=useState(''),[confirmed,setConfirmed]=useState(false),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[error,setError]=useState(''),[stage,setStage]=useState('disconnected'),[phone,setPhone]=useState(''),[code,setCode]=useState(''),[password,setPassword]=useState(''),[seconds,setSeconds]=useState(0),[attempt,setAttempt]=useState('');
  async function api(path:string,init:RequestInit={}){const r=await fetch('/api/backend'+path,init);if(!r.ok){const data=await r.json();const wait=Number(r.headers.get('Retry-After')||data.retry_after||0);if(wait)setSeconds(wait);throw Error(data.detail||'Operação não concluída')}return r;}
- async function load(){const r=await api('/leads');setLeads(await r.json())}
- async function action(fn:()=>Promise<void>){setBusy(true);setError('');setMessage('');try{await fn()}catch(e){setError(e instanceof Error?e.message:'Falha de conexão')}finally{setBusy(false)}}
+ async function load(){const r=await api('/leads');const data:Lead[]=await r.json();setLeads(data);return data}
+ async function action(fn:()=>Promise<unknown>){setBusy(true);setError('');setMessage('');try{await fn()}catch(e){setError(e instanceof Error?e.message:'Falha de conexão')}finally{setBusy(false)}}
  async function connect(){await action(async()=>{const r=await api('/auth/status');setStage((await r.json()).authorized?'authorized':'phone_required');await load()})}
  useEffect(()=>{void connect()},[]);
  useEffect(()=>{if(seconds<=0)return;const timer=setTimeout(()=>setSeconds(seconds-1),1000);return()=>clearTimeout(timer)},[seconds]);
@@ -15,9 +15,22 @@ export default function Contacts(){
  function choose(id:number){if(busy)return;setSelected(id);setConfirmed(false);setAttempt(crypto.randomUUID());setMessage('');setError('')}
  function next(){const index=visible.findIndex(x=>x.id===selected);const item=visible.slice(index+1).find(x=>x.status==='pending'&&!x.blocked)||visible.find(x=>x.id!==selected&&x.status==='pending'&&!x.blocked);if(item)choose(item.id);else setMessage('Não há outro contato pendente neste filtro.')}
  async function auth(step:string,body:object){await action(async()=>{const r=await api('/auth/'+step,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});setStage((await r.json()).state);setCode('');setPassword('')})}
- async function upload(file:File){await action(async()=>{const f=new FormData();f.append('file',file);const r=await api('/leads/import',{method:'POST',body:f});const info=await r.json();setMessage(`${info.added} contatos adicionados · ${info.already_imported} já importados · ${info.invalid} sem username válido · ${info.duplicates} duplicatas.`);await load()})}
+ async function upload(file:File){await action(async()=>{const f=new FormData();f.append('file',file);const r=await api('/leads/import',{method:'POST',body:f});const info=await r.json();setMessage(`${info.added} contatos adicionados · ${info.already_imported} já importados · ${info.excluded||0} excluídos anteriormente · ${info.invalid} sem username válido · ${info.duplicates} duplicatas.`);await load()})}
  async function send(){if(!lead||!confirmed)return;await action(async()=>{const form=new FormData();form.append('text',rendered);form.append('confirmed','true');form.append('request_id',attempt);if(image)form.append('image',image);const r=await api(`/leads/${lead.id}/send`,{method:'POST',body:form});await r.json();setMessage(`Mensagem enviada para @${lead.username}.`);setConfirmed(false);setSeconds(10);await load()});}
  async function block(){if(!lead)return;await action(async()=>{await api(`/leads/${lead.id}/block`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({blocked:!lead.blocked})});await load();setConfirmed(false)})}
+ async function remove(){
+  if(!lead||busy)return;
+  const recipient=lead;
+  if(!window.confirm(`Excluir ${recipient.name||recipient.username} (@${recipient.username}) da lista?\n\nEle não voltará ao importar a mesma planilha. Isso não apaga conversas nem contatos do Telegram.`))return;
+  await action(async()=>{
+   await api(`/leads/${recipient.id}/delete`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirmed:true})});
+   const remaining=await load();
+   const shown=remaining.filter(x=>(filter==='all'||(filter==='pending'?x.status==='pending'&&!x.blocked:filter==='blocked'?x.blocked:x.status==='sent'))&&`${x.name} ${x.username}`.toLowerCase().includes(search.toLowerCase()));
+   const replacement=shown[Math.min(Math.max(visible.findIndex(x=>x.id===recipient.id),0),shown.length-1)];
+   setSelected(replacement?.id??null);setConfirmed(false);setAttempt(crypto.randomUUID());
+   setMessage(`Contato @${recipient.username} excluído da lista.`);
+  });
+ }
  const sent=leads.filter(x=>x.status==='sent').length;
  return <div className="messenger"><header className="send-header"><div><strong>Telegram · Contatos</strong><span>Envio individual pela sua conta</span></div><div className="header-actions"><span className="connection">{stage==='authorized'?'● Conta conectada':'○ Conta desconectada'}</span><button disabled={busy} onClick={connect}>Verificar conexão</button></div></header>
  <div className="send-body">
@@ -34,7 +47,7 @@ export default function Contacts(){
  <div className="attachment"><label className={`upload-button secondary ${busy?'disabled':''}`}>Adicionar imagem<input disabled={busy} type="file" accept="image/png,image/jpeg" onChange={e=>{const f=e.target.files?.[0];if(f&&f.size>5*1024*1024){setError('Imagem acima de 5 MB');return}setImage(f||null);setConfirmed(false);e.target.value=''}}/></label><span>PNG ou JPEG · até 5 MB</span>{image&&<button disabled={busy} className="plain-button" onClick={()=>{setImage(null);setConfirmed(false)}}>Remover imagem</button>}</div>
  <div className="message-preview"><span>Prévia para @{lead.username}</span>{preview&&<img src={preview} alt="Imagem selecionada"/>}<p>{rendered||'Somente imagem'}</p></div>
  <label className="confirm-send"><input type="checkbox" disabled={busy} checked={confirmed} onChange={e=>setConfirmed(e.target.checked)}/>Conferi o destinatário e o conteúdo. Este contato autorizou esta comunicação.</label>
- <div className="send-actions"><button disabled={busy||stage!=='authorized'||!confirmed||lead.blocked||lead.status!=='pending'||seconds>0||(!rendered.trim()&&!image)||rendered.length>(image?1024:4096)} onClick={send}>{seconds>0?`Aguarde ${seconds}s`:'Enviar para este contato'}</button><button className="secondary" disabled={busy} onClick={next}>Próximo contato →</button><button className="plain-button" disabled={busy} onClick={block}>{lead.blocked?'Desbloquear contato':'Bloquear contato'}</button></div>
+ <div className="send-actions"><button disabled={busy||stage!=='authorized'||!confirmed||lead.blocked||lead.status!=='pending'||seconds>0||(!rendered.trim()&&!image)||rendered.length>(image?1024:4096)} onClick={send}>{seconds>0?`Aguarde ${seconds}s`:'Enviar para este contato'}</button><button className="secondary" disabled={busy} onClick={next}>Próximo contato →</button><button className="plain-button" disabled={busy} onClick={block}>{lead.blocked?'Desbloquear contato':'Bloquear contato'}</button><button className="danger-button" disabled={busy} onClick={remove}>Excluir contato</button></div>
  {lead.last_contact&&<p>Último envio: {new Date(lead.last_contact).toLocaleString('pt-BR')}</p>}<p className="send-footnote">Um envio por clique. Não há fila automática. Se o Telegram limitar a conta, o processamento para; intervalos não garantem ausência de restrições.</p></>}
  </section></div></div></div>
 }
