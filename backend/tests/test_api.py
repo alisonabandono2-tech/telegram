@@ -258,3 +258,48 @@ def test_delete_access_and_busy_guard(api):
     assert client.post('/leads/99999/delete',json={'confirmed':True}).status_code==404
     client.headers['Authorization']='Bearer wrong'
     assert client.post(f'/leads/{uid}/delete',json={'confirmed':True}).status_code==401
+
+
+def test_html_bold_text_and_literal_default(api):
+    from telethon.extensions.html import parse
+    from telethon.tl.types import MessageEntityBold
+    client,fake,module=api
+    prepare_sender(fake)
+    _,leads=import_contacts(client)
+    text='<b>Olá Ana 🧪</b>'
+    result=send(client,leads[0]['id'],data={'text':text,'formatting':'html'})
+    assert result.status_code==200,result.text
+    assert fake.send_message.await_args.args[1]==text
+    assert fake.send_message.await_args.kwargs['parse_mode']=='html'
+    rendered,entities=parse(text)
+    assert rendered=='Olá Ana 🧪'
+    assert isinstance(entities[0],MessageEntityBold)
+    assert entities[0].length==len(rendered.encode('utf-16-le'))//2
+
+
+def test_html_caption_limit_uses_visible_text(api):
+    from PIL import Image
+    client,fake,module=api
+    prepare_sender(fake)
+    _,leads=import_contacts(client)
+    img=io.BytesIO();Image.new('RGB',(4,4),'blue').save(img,format='PNG')
+    image={'image':('photo.png',img.getvalue(),'image/png')}
+    assert send(client,leads[0]['id'],data={'text':'<b>'+'a'*1025+'</b>','formatting':'html'},files=image).status_code==400
+    result=send(client,leads[0]['id'],data={'text':'<b>'+'a'*1024+'</b>','formatting':'html'},files=image)
+    assert result.status_code==200,result.text
+    assert fake.send_file.await_args.kwargs['parse_mode']=='html'
+    assert fake.send_message.await_count==0
+
+
+def test_html_validation_rejects_unknown_attributes_and_unclosed_tags(api):
+    client,fake,module=api
+    prepare_sender(fake)
+    _,leads=import_contacts(client)
+    for text in ['<b>unclosed','<b>wrong</i>','<script>alert(1)</script>','<b onclick="test">test</b>','<b></b>','<strike>unsupported</strike>','<![CDATA[test]]>']:
+        assert send(client,leads[0]['id'],data={'text':text,'formatting':'html'}).status_code==400
+    assert send(client,leads[0]['id'],data={'text':'test','formatting':'invalid'}).status_code==422
+    assert fake.send_message.await_count==0
+    assert fake.get_entity.await_count==0
+    assert client.get('/leads').json()[0]['status']=='pending'
+    assert module.message_text('<b>literal</b>','plain')=='<b>literal</b>'
+    assert module.message_text('<b>Ana &lt;Pessoa&gt; &amp; Cia</b>','html')=='Ana <Pessoa> & Cia'

@@ -21,3 +21,11 @@ Há um aviso de depreciação da integração Starlette/AnyIO nos testes, sem fa
 - Teste Chromium passou: cancelar/confirmar exclusão, atualização dos contadores, manutenção de exclusões após nova importação, seleção do próximo e remoção do último contato sem erro. Nenhum contato real foi excluído durante testes.
 
 - Correção do updater após execução no Windows: Invoke-WebRequest interpretava `[...path]` no caminho de saída. Downloads e backups agora usam nomes planos derivados de SHA256; a instalação/restauração usa System.IO.File.Copy com caminhos literais. Os quatro downloads reais da revisão publicada foram conferidos com seus checksums. Não foi possível instalar PowerShell nesta máquina de teste (imagem Microsoft e API de release bloqueadas por HTTP403); a execução completa do helper corrigido no Windows permanece pendente.
+
+## Formatação de mensagens
+
+- 23 testes Python passaram: os 20 anteriores e 3 de formatação. A suíte foi executada em SQLite e PostgreSQL 16. Cobre modo literal por padrão, HTML opcional em texto/legenda, entidades de negrito com emoji pelo parser real do Telethon, limites pelo texto visível e rejeição de marcações inválidas antes de resolver o destinatário ou enviar.
+- Build de produção e TypeScript passaram. Teste Chromium passou com o botão Negrito, substituição de `{nome}`, prévia formatada e envio simulado com imagem, mantendo as verificações de login, importação, exclusão e mobile.
+- A prévia usa elementos React de uma lista restrita, sem inserir HTML arbitrário. Nomes são escapados no modo HTML. O modo antigo continua literal, com `parse_mode=None`; o modo opcional usa `parse_mode='html'` tanto em texto quanto em legenda.
+- `atualizar-formatacao.ps1` usa o mesmo procedimento de download verificado, backup e restauração do helper de exclusão. Não exige novas dependências nem altera configuração, sessão ou banco. Sua execução completa em Windows não foi verificada neste ambiente Linux.
+- Nenhuma mensagem real foi enviada, editada ou reenviada durante estes testes. A atualização vale para os próximos envios feitos com a opção de formatação ativada.

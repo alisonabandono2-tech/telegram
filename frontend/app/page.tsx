@@ -1,7 +1,26 @@
 'use client';
-import {useEffect,useState} from 'react';
+import {useEffect,useState,useRef,createElement,ReactNode} from 'react';
 type Lead={id:number;name:string;username:string;telegram_id:string|null;status:string;last_contact:string|null;blocked:boolean};
+type RichNode={tag:string;children:(RichNode|string)[]};
+const formatTags=new Set(['b','strong','i','em','u','s','del','code','pre']);
+function decodeText(value:string){return value.replace(/&(amp|lt|gt|quot|apos|nbsp|#\d+|#x[0-9a-f]+);/gi,(original,entity:string)=>{const map:Record<string,string>={amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",nbsp:'\u00a0'};const key=entity.toLowerCase();if(map[key])return map[key];const cp=key.startsWith('#x')?parseInt(key.slice(2),16):parseInt(key.slice(1),10);return Number.isFinite(cp)&&cp>0&&cp<=0x10ffff?String.fromCodePoint(cp):original})}
+function richTree(value:string){
+ const root:RichNode={tag:'root',children:[]},stack=[root];let last=0;
+ for(const match of value.matchAll(/<(\/?)([a-z]+)>/gi)){
+  const tag=match[2].toLowerCase();if(!formatTags.has(tag))continue;
+  stack[stack.length-1].children.push(decodeText(value.slice(last,match.index)));
+  if(match[1]){if(stack.length>1&&stack[stack.length-1].tag===tag)stack.pop();else stack[stack.length-1].children.push(match[0])}
+  else if(stack.length>=33){stack[stack.length-1].children.push(match[0])}
+  else{const node:RichNode={tag,children:[]};stack[stack.length-1].children.push(node);stack.push(node)}
+  last=match.index!+match[0].length;
+ }
+ stack[stack.length-1].children.push(decodeText(value.slice(last)));return root;
+}
+function richChildren(node:RichNode):ReactNode[]{return node.children.map((child,index)=>typeof child==='string'?child:createElement(child.tag,{key:index},...richChildren(child)))}
+function plainRichText(node:RichNode):string{return node.children.map(child=>typeof child==='string'?child:plainRichText(child)).join('')}
+function escapeName(value:string){return value.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;')}
 export default function Contacts(){
+ const editor=useRef<HTMLTextAreaElement>(null);const [htmlMode,setHtmlMode]=useState(false);
  const [leads,setLeads]=useState<Lead[]>([]),[selected,setSelected]=useState<number|null>(null),[search,setSearch]=useState(''),[filter,setFilter]=useState('all'),[text,setText]=useState('Olá {nome}, tudo bem?'),[image,setImage]=useState<File|null>(null),[preview,setPreview]=useState(''),[confirmed,setConfirmed]=useState(false),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[error,setError]=useState(''),[stage,setStage]=useState('disconnected'),[phone,setPhone]=useState(''),[code,setCode]=useState(''),[password,setPassword]=useState(''),[seconds,setSeconds]=useState(0),[attempt,setAttempt]=useState('');
  async function api(path:string,init:RequestInit={}){const r=await fetch('/api/backend'+path,init);if(!r.ok){const data=await r.json();const wait=Number(r.headers.get('Retry-After')||data.retry_after||0);if(wait)setSeconds(wait);throw Error(data.detail||'Operação não concluída')}return r;}
  async function load(){const r=await api('/leads');const data:Lead[]=await r.json();setLeads(data);return data}
@@ -10,13 +29,13 @@ export default function Contacts(){
  useEffect(()=>{void connect()},[]);
  useEffect(()=>{if(seconds<=0)return;const timer=setTimeout(()=>setSeconds(seconds-1),1000);return()=>clearTimeout(timer)},[seconds]);
  useEffect(()=>{if(!image){setPreview('');return}const url=URL.createObjectURL(image);setPreview(url);return()=>URL.revokeObjectURL(url)},[image]);
- const lead=leads.find(x=>x.id===selected);const rendered=text.replaceAll('{nome}',lead?.name||lead?.username||'');
+ const lead=leads.find(x=>x.id===selected);const name=lead?.name||lead?.username||'';const rendered=text.replaceAll('{nome}',htmlMode?escapeName(name):name);const formatted=richTree(rendered);const visibleLength=(htmlMode?plainRichText(formatted):rendered).length;
  const visible=leads.filter(x=>(filter==='all'||(filter==='pending'?x.status==='pending'&&!x.blocked:filter==='blocked'?x.blocked:x.status==='sent'))&&`${x.name} ${x.username}`.toLowerCase().includes(search.toLowerCase()));
  function choose(id:number){if(busy)return;setSelected(id);setConfirmed(false);setAttempt(crypto.randomUUID());setMessage('');setError('')}
  function next(){const index=visible.findIndex(x=>x.id===selected);const item=visible.slice(index+1).find(x=>x.status==='pending'&&!x.blocked)||visible.find(x=>x.id!==selected&&x.status==='pending'&&!x.blocked);if(item)choose(item.id);else setMessage('Não há outro contato pendente neste filtro.')}
  async function auth(step:string,body:object){await action(async()=>{const r=await api('/auth/'+step,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});setStage((await r.json()).state);setCode('');setPassword('')})}
  async function upload(file:File){await action(async()=>{const f=new FormData();f.append('file',file);const r=await api('/leads/import',{method:'POST',body:f});const info=await r.json();setMessage(`${info.added} contatos adicionados · ${info.already_imported} já importados · ${info.excluded||0} excluídos anteriormente · ${info.invalid} sem username válido · ${info.duplicates} duplicatas.`);await load()})}
- async function send(){if(!lead||!confirmed)return;await action(async()=>{const form=new FormData();form.append('text',rendered);form.append('confirmed','true');form.append('request_id',attempt);if(image)form.append('image',image);const r=await api(`/leads/${lead.id}/send`,{method:'POST',body:form});await r.json();setMessage(`Mensagem enviada para @${lead.username}.`);setConfirmed(false);setSeconds(10);await load()});}
+ async function send(){if(!lead||!confirmed)return;await action(async()=>{const form=new FormData();form.append('text',rendered);form.append('formatting',htmlMode?'html':'plain');form.append('confirmed','true');form.append('request_id',attempt);if(image)form.append('image',image);const r=await api(`/leads/${lead.id}/send`,{method:'POST',body:form});await r.json();setMessage(`Mensagem enviada para @${lead.username}.`);setConfirmed(false);setSeconds(10);await load()});}
  async function block(){if(!lead)return;await action(async()=>{await api(`/leads/${lead.id}/block`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({blocked:!lead.blocked})});await load();setConfirmed(false)})}
  async function remove(){
   if(!lead||busy)return;
@@ -31,6 +50,13 @@ export default function Contacts(){
    setMessage(`Contato @${recipient.username} excluído da lista.`);
   });
  }
+ function markSelection(tag:'b'|'i'){
+  const field=editor.current;if(!field||busy)return;
+  const start=field.selectionStart,end=field.selectionEnd;
+  if(start===end){setError('Selecione primeiro o trecho da mensagem para formatar.');field.focus();return}
+  setText(text.slice(0,start)+`<${tag}>`+text.slice(start,end)+`</${tag}>`+text.slice(end));setConfirmed(false);setError('');
+  requestAnimationFrame(()=>{field.focus();field.setSelectionRange(start+tag.length+2,end+tag.length+2)});
+ }
  const sent=leads.filter(x=>x.status==='sent').length;
  return <div className="messenger"><header className="send-header"><div><strong>Telegram · Contatos</strong><span>Envio individual pela sua conta</span></div><div className="header-actions"><span className="connection">{stage==='authorized'?'● Conta conectada':'○ Conta desconectada'}</span><button disabled={busy} onClick={connect}>Verificar conexão</button></div></header>
  <div className="send-body">
@@ -43,11 +69,11 @@ export default function Contacts(){
  {busy&&<p role="status" className="notice">Processando… aguarde sem clicar novamente.</p>}{message&&<p role="status" className="success">{message}</p>}{error&&<p role="alert" className="send-error">{error} <button disabled={busy} onClick={()=>void action(load)}>Atualizar lista</button></p>}
  <div className="workspace"><aside className="lead-sidebar"><input aria-label="Pesquisar contatos" placeholder="Buscar nome ou @username…" value={search} onChange={e=>setSearch(e.target.value)}/><div className="lead-counter">{leads.length} contatos · {sent} enviados</div><select aria-label="Filtrar contatos" value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">Todos os contatos</option><option value="pending">Pendentes</option><option value="sent">Enviados</option><option value="blocked">Bloqueados</option></select><div className="lead-list">{visible.map(x=><button key={x.id} className={`lead-item ${selected===x.id?'active':''}`} disabled={busy} onClick={()=>choose(x.id)}><span>{x.name||x.username}</span><small>@{x.username} · {x.blocked?'Bloqueado':x.status==='sent'?'Enviado':x.status==='unknown'?'Conferir no Telegram':'Pendente'}</small></button>)}{!visible.length&&<p>Nenhum contato neste filtro.</p>}</div></aside>
  <section className="composer">{!lead?<div className="empty"><div>✉</div><h2>Escolha um contato</h2><p>Selecione alguém na lista para preparar sua mensagem.</p></div>:<><div className="recipient"><div><h2>{lead.name||lead.username}</h2><p>@{lead.username}{lead.telegram_id?` · ID: ${lead.telegram_id}`:''}</p></div><span className={`status-chip ${lead.status==='sent'?'is-sent':''}`}>{lead.blocked?'Bloqueado':lead.status==='sent'?'Enviado':lead.status==='unknown'?'Resultado incerto':'Pendente'}</span></div>
- <label className="field-label" htmlFor="message">Mensagem</label><textarea id="message" disabled={busy} placeholder="Escreva sua mensagem…" value={text} onChange={e=>{setText(e.target.value);setConfirmed(false)}}/><div className="text-meta"><span>Use {'{nome}'} para inserir o nome do contato.</span><span>{rendered.length}/{image?1024:4096}</span></div>
+ <label className="field-label" htmlFor="message">Mensagem</label><div className="format-controls"><label><input type="checkbox" checked={htmlMode} disabled={busy} onChange={e=>{setHtmlMode(e.target.checked);setConfirmed(false)}}/>Usar formatação (negrito/itálico)</label>{htmlMode&&<><button type="button" disabled={busy} onMouseDown={e=>e.preventDefault()} onClick={()=>markSelection('b')}>Negrito</button><button type="button" disabled={busy} onMouseDown={e=>e.preventDefault()} onClick={()=>markSelection('i')}>Itálico</button></>}</div><textarea ref={editor} maxLength={32768} id="message" disabled={busy} placeholder="Escreva sua mensagem…" value={text} onChange={e=>{setText(e.target.value);setConfirmed(false)}}/><div className="text-meta"><span>Use {'{nome}'} para inserir o nome do contato.</span><span>{visibleLength}/{image?1024:4096}</span></div>
  <div className="attachment"><label className={`upload-button secondary ${busy?'disabled':''}`}>Adicionar imagem<input disabled={busy} type="file" accept="image/png,image/jpeg" onChange={e=>{const f=e.target.files?.[0];if(f&&f.size>5*1024*1024){setError('Imagem acima de 5 MB');return}setImage(f||null);setConfirmed(false);e.target.value=''}}/></label><span>PNG ou JPEG · até 5 MB</span>{image&&<button disabled={busy} className="plain-button" onClick={()=>{setImage(null);setConfirmed(false)}}>Remover imagem</button>}</div>
- <div className="message-preview"><span>Prévia para @{lead.username}</span>{preview&&<img src={preview} alt="Imagem selecionada"/>}<p>{rendered||'Somente imagem'}</p></div>
+ <div className="message-preview"><span>Prévia para @{lead.username}</span>{preview&&<img src={preview} alt="Imagem selecionada"/>}<div className="preview-text">{htmlMode?richChildren(formatted):(rendered||'Somente imagem')}</div></div>
  <label className="confirm-send"><input type="checkbox" disabled={busy} checked={confirmed} onChange={e=>setConfirmed(e.target.checked)}/>Conferi o destinatário e o conteúdo. Este contato autorizou esta comunicação.</label>
- <div className="send-actions"><button disabled={busy||stage!=='authorized'||!confirmed||lead.blocked||lead.status!=='pending'||seconds>0||(!rendered.trim()&&!image)||rendered.length>(image?1024:4096)} onClick={send}>{seconds>0?`Aguarde ${seconds}s`:'Enviar para este contato'}</button><button className="secondary" disabled={busy} onClick={next}>Próximo contato →</button><button className="plain-button" disabled={busy} onClick={block}>{lead.blocked?'Desbloquear contato':'Bloquear contato'}</button><button className="danger-button" disabled={busy} onClick={remove}>Excluir contato</button></div>
+ <div className="send-actions"><button disabled={busy||stage!=='authorized'||!confirmed||lead.blocked||lead.status!=='pending'||seconds>0||(!(htmlMode?plainRichText(formatted):rendered).trim()&&!image)||visibleLength>(image?1024:4096)} onClick={send}>{seconds>0?`Aguarde ${seconds}s`:'Enviar para este contato'}</button><button className="secondary" disabled={busy} onClick={next}>Próximo contato →</button><button className="plain-button" disabled={busy} onClick={block}>{lead.blocked?'Desbloquear contato':'Bloquear contato'}</button><button className="danger-button" disabled={busy} onClick={remove}>Excluir contato</button></div>
  {lead.last_contact&&<p>Último envio: {new Date(lead.last_contact).toLocaleString('pt-BR')}</p>}<p className="send-footnote">Um envio por clique. Não há fila automática. Se o Telegram limitar a conta, o processamento para; intervalos não garantem ausência de restrições.</p></>}
  </section></div></div></div>
 }

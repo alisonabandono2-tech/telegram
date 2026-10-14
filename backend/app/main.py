@@ -10,6 +10,9 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Header, Depe
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, SecretStr
+from typing import Literal
+from html.parser import HTMLParser
+from telethon.extensions.html import parse as parse_telegram_html
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import create_engine, Column, Integer, JSON, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -366,18 +369,69 @@ def set_cooldown(db, seconds):
     control.next_allowed = datetime.now(timezone.utc) + timedelta(seconds=seconds)
 
 
+class MessageMarkup(HTMLParser):
+    allowed = {'b', 'strong', 'i', 'em', 'u', 's', 'del', 'code', 'pre'}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in self.allowed or attrs or len(self.stack) >= 32:
+            raise ValueError('Use apenas b, i, u, s, code ou pre, sem atributos.')
+        self.stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if not self.stack or self.stack.pop() != tag:
+            raise ValueError('Confira a abertura e o fechamento das marcações HTML.')
+
+    def handle_startendtag(self, tag, attrs):
+        raise ValueError('Marcações devem conter abertura e fechamento.')
+
+    def handle_comment(self, data):
+        raise ValueError('Comentários HTML não são suportados.')
+
+    def handle_decl(self, decl):
+        raise ValueError('Declarações HTML não são suportadas.')
+
+    def unknown_decl(self, data):
+        raise ValueError('Declarações HTML não são suportadas.')
+
+    def handle_pi(self, data):
+        raise ValueError('Instruções HTML não são suportadas.')
+
+
+def message_text(text, formatting):
+    if len(text) > 32768:
+        raise ValueError('Mensagem muito grande.')
+    if formatting == 'plain':
+        return text
+    validator = MessageMarkup()
+    validator.feed(text)
+    validator.close()
+    if validator.stack:
+        raise ValueError('Feche todas as marcações HTML antes de enviar.')
+    rendered, _ = parse_telegram_html(text)
+    return rendered
+
+
 @app.post('/leads/{lead_id}/send', dependencies=[Depends(authorize)])
-async def send_one(lead_id: int, text: str = Form(default=''), confirmed: bool = Form(default=False), request_id: str = Form(...), image: UploadFile | None = File(default=None)):
+async def send_one(lead_id: int, text: str = Form(default=''), confirmed: bool = Form(default=False), request_id: str = Form(...), image: UploadFile | None = File(default=None), formatting: Literal['plain', 'html'] = Form(default='plain')):
     try:
         request_id = str(uuid.UUID(request_id))
     except ValueError:
         raise HTTPException(400, 'Identificador do envio inválido')
     if not confirmed:
         raise HTTPException(400, 'Confirme destinatário e conteúdo antes de enviar')
-    if not text.strip() and image is None:
+    try:
+        visible_text = message_text(text, formatting)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not visible_text.strip() and image is None:
         raise HTTPException(400, 'Escreva uma mensagem ou selecione uma imagem')
-    if len(text) > (1024 if image else 4096):
-        raise HTTPException(400, 'Texto acima do limite: 1024 com imagem ou 4096 sem imagem')
+    if len(visible_text.encode('utf-16-le')) // 2 > (1024 if image else 4096):
+        raise HTTPException(400, 'Texto visível acima do limite: 1024 com imagem ou 4096 sem imagem')
+    parse_mode = 'html' if formatting == 'html' else None
     photo = None
     if image is not None:
         from PIL import Image, UnidentifiedImageError
@@ -439,9 +493,9 @@ async def send_one(lead_id: int, text: str = Form(default=''), confirmed: bool =
             db.commit()
             try:
                 if photo is not None:
-                    await client.send_file(target, photo, caption=text, parse_mode=None)
+                    await client.send_file(target, photo, caption=text, parse_mode=parse_mode)
                 else:
-                    await client.send_message(target, text, parse_mode=None)
+                    await client.send_message(target, text, parse_mode=parse_mode)
             except errors.FloodWaitError as exc:
                 attempt.state = 'failed'
                 item.status = 'pending'
