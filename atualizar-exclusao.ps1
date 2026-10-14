@@ -20,10 +20,10 @@ $crmExpected = @{
 $crmPrivate = Join-Path $crmRoot ('private\updates\' + [guid]::NewGuid().ToString('N'))
 $crmStage = Join-Path $crmPrivate 'new'
 $crmBackup = Join-Path $crmPrivate 'backup'
-$crmUpdated = @()
+[System.IO.Directory]::CreateDirectory($crmStage) | Out-Null
+[System.IO.Directory]::CreateDirectory($crmBackup) | Out-Null
 foreach ($crmRelative in $crmExpected.Keys) {
-    $crmDownload = Join-Path $crmStage $crmRelative
-    New-Item -ItemType Directory -Path (Split-Path -Parent $crmDownload) -Force | Out-Null
+    $crmDownload = Join-Path $crmStage ($crmExpected[$crmRelative] + '.download')
     $crmEncodedPath = (($crmRelative -split '/') | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
     $crmUrl = 'https://raw.githubusercontent.com/alisonabandono2-tech/telegram/' + $Ref + '/' + $crmEncodedPath
     Invoke-WebRequest -UseBasicParsing -Uri $crmUrl -OutFile $crmDownload -TimeoutSec 60
@@ -34,18 +34,18 @@ foreach ($crmRelative in $crmExpected.Keys) {
 foreach ($crmRelative in $crmExpected.Keys) {
     $crmCurrent = Join-Path $crmRoot $crmRelative
     if (-not (Test-Path -LiteralPath $crmCurrent)) { throw ('Arquivo da instalacao nao encontrado: ' + $crmRelative) }
-    $crmSaved = Join-Path $crmBackup $crmRelative
-    New-Item -ItemType Directory -Path (Split-Path -Parent $crmSaved) -Force | Out-Null
-    Copy-Item -LiteralPath $crmCurrent -Destination $crmSaved -Force
+    $crmSaved = Join-Path $crmBackup ($crmExpected[$crmRelative] + '.backup')
+    [System.IO.File]::Copy($crmCurrent, $crmSaved, $true)
 }
 try {
     foreach ($crmRelative in $crmExpected.Keys) {
-        Copy-Item -LiteralPath (Join-Path $crmStage $crmRelative) -Destination (Join-Path $crmRoot $crmRelative) -Force
-        $crmUpdated += $crmRelative
+        $crmSource = Join-Path $crmStage ($crmExpected[$crmRelative] + '.download')
+        [System.IO.File]::Copy($crmSource, (Join-Path $crmRoot $crmRelative), $true)
     }
 } catch {
     foreach ($crmRelative in $crmExpected.Keys) {
-        Copy-Item -LiteralPath (Join-Path $crmBackup $crmRelative) -Destination (Join-Path $crmRoot $crmRelative) -Force
+        $crmSaved = Join-Path $crmBackup ($crmExpected[$crmRelative] + '.backup')
+        [System.IO.File]::Copy($crmSaved, (Join-Path $crmRoot $crmRelative), $true)
     }
     throw 'Atualizacao nao concluida. Os arquivos copiados foram restaurados da copia de seguranca.'
 }
